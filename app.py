@@ -8,7 +8,7 @@ import streamlit as st
 
 st.set_page_config(page_title='Bioassay Analysis App', layout='wide')
 
-# 1. 全局字體設定 (完全鎖定原始設定)
+# 1. 全局字體設定 (完全保留原始設定)
 plt.rcParams['font.sans-serif'] = 'Arial'
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['axes.unicode_minus'] = False
@@ -18,7 +18,6 @@ plt.rcParams['axes.unicode_minus'] = False
 # 工具函數：正則解析與數據清洗
 # ==========================================
 def extract_conc_and_unit(sample_name: str):
-    """自動從樣本名稱擷取濃度數值與單位"""
     if sample_name.lower() in ['basal', 'control']:
         return '–', ''
     match = re.search(r'([\d.]+)\s*([a-zA-Zμµ/]+)', sample_name)
@@ -28,7 +27,7 @@ def extract_conc_and_unit(sample_name: str):
 
 
 def sort_groups_smart(g_list):
-    """將組別依 basal -> control -> 濃度小到大 -> alone 排序"""
+    """保證組別依 basal -> control -> 濃度由小到大 -> alone 排序"""
 
     def sort_key(g):
         g_lower = g.lower()
@@ -56,7 +55,6 @@ def process_assay_sheet(file_source, sheet_name: str, calc_factor: float = 1.0):
     df['Delta_OD'] = df['Max'] - df['Min']
     df['Final_Val'] = df['Delta_OD'] * calc_factor
 
-    # 清洗 Sample 欄位
     df_valid = df[df['Final_Val'].notna()].copy()
     df_valid['Raw_Sample'] = df_valid['Sample'].astype(str).str.strip()
     df_valid = df_valid[~df_valid['Raw_Sample'].str.contains(r'\(Avg', na=False)]
@@ -108,14 +106,14 @@ if uploaded_file is not None:
     selected_sheet = st.sidebar.selectbox('選擇藥物工作表 (Sheet)', available_sheets)
     df_clean = process_assay_sheet(uploaded_file, selected_sheet, calc_factor)
 
-    # 智能排序組別
+    # 智能依濃度升序排列組別
     raw_groups = list(df_clean['Clean_Sample'].unique())
     ordered_groups = sort_groups_smart(raw_groups)
 
     st.sidebar.markdown('---')
-    st.sidebar.subheader('🧪 組別勾選與排序')
+    st.sidebar.subheader('🧪 組別勾選')
     selected_groups = st.sidebar.multiselect(
-        '選取欲呈現的組別 (依選擇順序繪圖)',
+        '選取欲呈現的組別',
         options=ordered_groups,
         default=ordered_groups,
     )
@@ -125,17 +123,10 @@ if uploaded_file is not None:
         st.stop()
 
     st.sidebar.markdown('---')
-    st.sidebar.subheader('📐 統計與星號設定')
+    st.sidebar.subheader('📐 統計檢定')
     stat_opt = st.sidebar.selectbox(
         '統計檢定方法',
         ["1: Dunnett's test vs Control", "2: Student's t-test", '3: 無 / 不標註'],
-    )
-    star_x_offset = st.sidebar.slider(
-        '顯著星號 X 軸水平微調',
-        min_value=-0.15,
-        max_value=0.05,
-        value=-0.04,
-        step=0.005,
     )
 
     # 匯總計算
@@ -184,7 +175,7 @@ if uploaded_file is not None:
                 p_values[g] = p_val
 
     # ==========================================
-    # 主面板：彈性設定區
+    # 主面板：自訂設定區
     # ==========================================
     st.title(f'📊 {assay_mode} 統計圖產生器')
 
@@ -218,7 +209,7 @@ if uploaded_file is not None:
 
         custom_stim_label = f'{stim_name} ({stim_conc})'
 
-        # 預設前兩排文字
+        # 預設前兩排
         st.markdown('**底部矩陣前兩排文字修改**')
         cols = st.columns(len(selected_groups))
         custom_concs = []
@@ -283,10 +274,13 @@ if uploaded_file is not None:
                 extra_row_data.append(row_vals)
 
     # ==========================================
-    # 6. 開始繪製圖表 (100% 完全還原原始格式)
+    # 6. 開始繪製圖表 (100% 完全鎖定原始格式)
     # ==========================================
-    fig, ax = plt.subplots(figsize=(9.5, 7))
-    fig.subplots_adjust(left=0.25, bottom=0.3)
+    total_matrix_rows = 3 + len(extra_row_labels)
+    bottom_margin = min(0.48, 0.26 + (total_matrix_rows * 0.035))
+
+    fig, ax = plt.subplots(figsize=(9.5, 7.0))
+    fig.subplots_adjust(left=0.25, bottom=bottom_margin)
 
     x_pos = np.arange(len(sum_df))
     line_width = 1.4
@@ -358,7 +352,7 @@ if uploaded_file is not None:
         tick.tick1line.set_clip_on(False)
 
     # ==========================================
-    # 7. 自動繪製動態矩陣表格 (完全還原原始座標與字級)
+    # 7. 自動繪製動態矩陣表格
     # ==========================================
     all_row_labels = [custom_drug_label, custom_stim_label]
     all_col_data = [custom_concs, custom_stims]
@@ -387,7 +381,7 @@ if uploaded_file is not None:
         for row_idx in range(len(all_row_labels)):
             ax.text(
                 x_pos[col_idx],
-                y_offset + row_idx * y_step_offset,
+                y_offset + r_idx * y_step_offset,
                 all_col_data[row_idx][col_idx],
                 fontsize=18,
                 ha='center',
@@ -395,7 +389,7 @@ if uploaded_file is not None:
             )
 
     # ==========================================
-    # 8. 標註星號 ⭐ (100% 原版高度與垂直旋轉參數)
+    # 8. 標註星號 ⭐ (完全還原原始代碼的所有星號參數)
     # ==========================================
     for idx, row in sum_df.iterrows():
         sample = row['Sample']
@@ -412,7 +406,7 @@ if uploaded_file is not None:
             )
             if star_str:
                 y_anchor = row['mean'] + row['sem'] + (0.12 * y_top)
-                x_adjusted = x_pos[idx] + star_x_offset
+                x_adjusted = x_pos[idx] - 0.03
                 ax.text(
                     x_adjusted,
                     y_anchor,
@@ -424,7 +418,7 @@ if uploaded_file is not None:
                 )
 
     # ==========================================
-    # 9. Streamlit 呈現與下載
+    # 9. 呈現與下載
     # ==========================================
     col1, col2 = st.columns([3, 2])
     with col1:
