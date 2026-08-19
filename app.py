@@ -8,7 +8,7 @@ import streamlit as st
 
 st.set_page_config(page_title='Bioassay Analysis App', layout='wide')
 
-# 1. 全局字體設定
+# 1. 全局字體設定 (完全鎖定原始設定)
 plt.rcParams['font.sans-serif'] = 'Arial'
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['axes.unicode_minus'] = False
@@ -25,6 +25,25 @@ def extract_conc_and_unit(sample_name: str):
     if match:
         return match.group(1), match.group(2)
     return sample_name, ''
+
+
+def sort_groups_smart(g_list):
+    """將組別依 basal -> control -> 濃度小到大 -> alone 排序"""
+
+    def sort_key(g):
+        g_lower = g.lower()
+        if 'basal' in g_lower:
+            return (0, 0.0)
+        if 'control' in g_lower or 'ctrl' in g_lower:
+            return (1, 0.0)
+        if 'alone' in g_lower:
+            return (3, 0.0)
+        match = re.search(r'([\d.]+)', g)
+        if match:
+            return (2, float(match.group(1)))
+        return (2, 9999.0)
+
+    return sorted(g_list, key=sort_key)
 
 
 def process_assay_sheet(file_source, sheet_name: str, calc_factor: float = 1.0):
@@ -55,14 +74,18 @@ def process_assay_sheet(file_source, sheet_name: str, calc_factor: float = 1.0):
 # ==========================================
 st.sidebar.title('⚙️ 實驗模式與檔案')
 
-# 實驗模式切換
 assay_mode = st.sidebar.radio(
     '選擇實驗類型 (Assay Mode)',
-    ['Superoxide Generation', 'Elastase Release'],
+    ['Elastase Release', 'Superoxide Generation'],
 )
 
-# 依模式給予預設參數
-if assay_mode == 'Superoxide Generation':
+if assay_mode == 'Elastase Release':
+    calc_factor = 1.0
+    default_y_label = r'Elastase release (OD$_{405}$)'
+    default_stim_name = 'fMLF'
+    default_y_max = 0.8
+    default_y_step = 0.1
+else:
     calc_factor = 47.4
     default_y_label = (
         'Superoxide generation\n' r'(nmol/6$\times 10^5$ cells/10 min)'
@@ -70,12 +93,6 @@ if assay_mode == 'Superoxide Generation':
     default_stim_name = 'fMLP'
     default_y_max = 0.0
     default_y_step = 0.0
-else:
-    calc_factor = 1.0
-    default_y_label = r'Elastase release (OD$_{405}$)'
-    default_stim_name = 'fMLF'
-    default_y_max = 0.8
-    default_y_step = 0.1
 
 uploaded_file = st.sidebar.file_uploader(
     '上傳 Excel 檔案 (.xlsx)', type=['xlsx', 'xls']
@@ -91,19 +108,16 @@ if uploaded_file is not None:
     selected_sheet = st.sidebar.selectbox('選擇藥物工作表 (Sheet)', available_sheets)
     df_clean = process_assay_sheet(uploaded_file, selected_sheet, calc_factor)
 
-    # 自動排序組別 (basal, control 在前)
-    all_groups = list(df_clean['Clean_Sample'].unique())
-    ordered_groups = []
-    for anchor in ['basal', 'control']:
-        if anchor in all_groups:
-            ordered_groups.append(anchor)
-            all_groups.remove(anchor)
-    ordered_groups.extend(all_groups)
+    # 智能排序組別
+    raw_groups = list(df_clean['Clean_Sample'].unique())
+    ordered_groups = sort_groups_smart(raw_groups)
 
     st.sidebar.markdown('---')
-    st.sidebar.subheader('🧪 組別勾選')
+    st.sidebar.subheader('🧪 組別勾選與排序')
     selected_groups = st.sidebar.multiselect(
-        '選取欲呈現的組別', options=ordered_groups, default=ordered_groups
+        '選取欲呈現的組別 (依選擇順序繪圖)',
+        options=ordered_groups,
+        default=ordered_groups,
     )
 
     if not selected_groups:
@@ -120,7 +134,7 @@ if uploaded_file is not None:
         '顯著星號 X 軸水平微調',
         min_value=-0.15,
         max_value=0.05,
-        value=-0.03,
+        value=-0.04,
         step=0.005,
     )
 
@@ -154,7 +168,7 @@ if uploaded_file is not None:
 
     # 統計檢定
     p_values = {}
-    ctrl_vals = raw_group_vals = raw_dict.get('control', np.array([]))
+    ctrl_vals = raw_dict.get('control', np.array([]))
     for g in selected_groups:
         if g in ['basal', 'control']:
             continue
@@ -217,7 +231,9 @@ if uploaded_file is not None:
                 val_c = col.text_input(
                     f'Bar {i+1} 濃度', value=c_auto, key=f'c_{i}'
                 )
-                s_auto = '–' if g == 'basal' else '+'
+                s_auto = (
+                    '–' if g in ['basal', f'{selected_sheet} (alone)'] else '+'
+                )
                 val_s = col.text_input(
                     f'Bar {i+1} 刺激劑', value=s_auto, key=f's_{i}'
                 )
@@ -267,48 +283,43 @@ if uploaded_file is not None:
                 extra_row_data.append(row_vals)
 
     # ==========================================
-    # 繪圖區
+    # 6. 開始繪製圖表 (100% 完全還原原始格式)
     # ==========================================
-    total_matrix_rows = 3 + len(extra_row_labels)
-    bottom_margin = min(0.48, 0.26 + (total_matrix_rows * 0.035))
-
-    fig, ax = plt.subplots(figsize=(9.5, 7.2))
-    fig.subplots_adjust(left=0.25, bottom=bottom_margin)
+    fig, ax = plt.subplots(figsize=(9.5, 7))
+    fig.subplots_adjust(left=0.25, bottom=0.3)
 
     x_pos = np.arange(len(sum_df))
-    line_w = 1.4
-
-    # 處理負值 Error bar (若是負值 yerr 設 0 避免破版)
-    yerr_lower = np.zeros(len(sum_df))
-    yerr_upper = [
-        s if m >= 0 else 0 for m, s in zip(sum_df['mean'], sum_df['sem'])
-    ]
+    line_width = 1.4
 
     bars = ax.bar(
         x_pos,
         sum_df['mean'],
-        yerr=[yerr_lower, yerr_upper],
+        yerr=[np.zeros(len(sum_df)), sum_df['sem']],
         capsize=5,
         color='white',
         edgecolor='black',
-        linewidth=line_w,
+        linewidth=line_width,
         width=0.5,
     )
 
     for line in ax.get_lines():
-        line.set_linewidth(line_w)
+        line.set_linewidth(line_width)
 
-    ax.set_ylabel(y_label_input, fontsize=16, labelpad=25)
+    ax.set_ylabel(
+        y_label_input,
+        fontsize=18,
+        labelpad=80 if assay_mode == 'Elastase Release' else 25,
+    )
 
-    # Y 軸極限計算
-    max_top = (sum_df['mean'] + sum_df['sem']).max()
+    # 計算 Y 軸上限與邊界
+    max_bar_top = (sum_df['mean'] + sum_df['sem']).max()
     if y_max_custom > 0:
         y_top = float(y_max_custom)
     else:
-        if max_top <= 1.0:
-            y_top = 0.8
+        if max_bar_top <= 1.0:
+            y_top = 0.8  # 固定上限為 0.8
         else:
-            y_top = float(np.ceil(max_top / 5) * 5)
+            y_top = float(np.ceil(max_bar_top / 20) * 20)
 
     if y_step_custom > 0:
         y_step = float(y_step_custom)
@@ -322,21 +333,22 @@ if uploaded_file is not None:
         else:
             y_step = 20.0
 
-    # 若有微負值，底部稍微留微小空間，但 0 基準線維持在 0
-    y_min = -0.05 if sum_df['mean'].min() < 0 else 0.0
-    ax.set_ylim(y_min, y_top)
+    y_bottom = -0.05 if sum_df['mean'].min() < 0 else 0.0
+    ax.set_ylim(y_bottom, y_top)
+
     ax.set_yticks(np.arange(0, y_top + 0.0001, y_step))
     ax.set_xlim(-0.8, len(sum_df) - 0.2)
 
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_linewidth(line_w)
-    ax.spines['bottom'].set_linewidth(line_w)
+    ax.spines['left'].set_linewidth(line_width)
+    ax.spines['bottom'].set_linewidth(line_width)
+
     ax.spines['bottom'].set_position(('data', 0))
     ax.spines['left'].set_bounds(0, y_top)
 
     ax.tick_params(
-        axis='y', direction='out', length=6, width=line_w, labelsize=16
+        axis='y', direction='out', length=6, width=line_width, labelsize=18
     )
     ax.tick_params(axis='x', bottom=False)
     ax.set_xticks(x_pos)
@@ -345,7 +357,9 @@ if uploaded_file is not None:
     for tick in ax.yaxis.get_major_ticks():
         tick.tick1line.set_clip_on(False)
 
-    # 組裝矩陣
+    # ==========================================
+    # 7. 自動繪製動態矩陣表格 (完全還原原始座標與字級)
+    # ==========================================
     all_row_labels = [custom_drug_label, custom_stim_label]
     all_col_data = [custom_concs, custom_stims]
 
@@ -357,30 +371,32 @@ if uploaded_file is not None:
     all_col_data.append([f'n={int(c)}' for c in sum_df['count']])
 
     y_offset = -0.08 * y_top
-    y_step_offset = -0.085 * y_top
+    y_step_offset = -0.09 * y_top
 
     for r_idx, label in enumerate(all_row_labels):
         ax.text(
             -0.9,
             y_offset + r_idx * y_step_offset,
             label,
-            fontsize=16,
+            fontsize=18,
             ha='right',
             va='center',
         )
 
-    for c_idx in range(len(x_pos)):
-        for r_idx in range(len(all_row_labels)):
+    for col_idx in range(len(x_pos)):
+        for row_idx in range(len(all_row_labels)):
             ax.text(
-                x_pos[c_idx],
-                y_offset + r_idx * y_step_offset,
-                all_col_data[r_idx][c_idx],
-                fontsize=16,
+                x_pos[col_idx],
+                y_offset + row_idx * y_step_offset,
+                all_col_data[row_idx][col_idx],
+                fontsize=18,
                 ha='center',
                 va='center',
             )
 
-    # 顯著星號標註 ⭐ (垂直直立 rotation=90)
+    # ==========================================
+    # 8. 標註星號 ⭐ (100% 原版高度與垂直旋轉參數)
+    # ==========================================
     for idx, row in sum_df.iterrows():
         sample = row['Sample']
         if sample in p_values:
@@ -395,22 +411,23 @@ if uploaded_file is not None:
                 else ''
             )
             if star_str:
-                base_h = max(0, row['mean']) + row['sem']
-                y_anchor = base_h + (0.05 * y_top)
+                y_anchor = row['mean'] + row['sem'] + (0.12 * y_top)
                 x_adjusted = x_pos[idx] + star_x_offset
                 ax.text(
                     x_adjusted,
                     y_anchor,
                     star_str,
-                    fontsize=22,
+                    fontsize=24,
                     ha='left',
-                    va='bottom',
+                    va='center',
                     rotation=90,
                 )
 
-    # 畫面輸出與下載
-    col_plot, col_table = st.columns([3, 2])
-    with col_plot:
+    # ==========================================
+    # 9. Streamlit 呈現與下載
+    # ==========================================
+    col1, col2 = st.columns([3, 2])
+    with col1:
         st.pyplot(fig)
         buf = io.BytesIO()
         fig.savefig(buf, format='png', dpi=300)
@@ -421,7 +438,7 @@ if uploaded_file is not None:
             mime='image/png',
         )
 
-    with col_table:
+    with col2:
         st.subheader('📋 數據摘要表')
         summary_display = sum_df.copy()
         summary_display['Mean ± SEM'] = summary_display.apply(
@@ -438,4 +455,4 @@ if uploaded_file is not None:
         )
 
 else:
-    st.info('👈 請先於左側側邊欄選擇實驗模式並上傳 Excel 數據檔以開始分析。')
+    st.info('👈 請由左側側邊欄上傳你的 Excel 數據檔。')
